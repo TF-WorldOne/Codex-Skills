@@ -10,6 +10,8 @@
 
 `multi-model-synthesis` は、1つの課題を5つのモデルAPIへ同時に投げ、各モデルの独立回答をGPT 5.5 Proがすぐに総括するスキルです。
 
+詳細: [skills/multi-model-synthesis/README.md](skills/multi-model-synthesis/README.md)
+
 使うモデル:
 
 - GPT 5.5 Pro
@@ -34,6 +36,8 @@ py ".\skills\multi-model-synthesis\scripts\run_panel.py" --prompt "日本で最�
 #### 2. Multi-Model Discussion
 
 `multi-model-discussion` は、1つの課題を5つのモデルAPIへ同時に投げたあと、各モデルに他モデルの回答を読ませて反論・補足・再評価させ、最後にGPT 5.5 Proが総括するスキルです。
+
+詳細: [skills/multi-model-discussion/README.md](skills/multi-model-discussion/README.md)
 
 流れ:
 
@@ -111,6 +115,8 @@ This repository contains reusable Codex Skills/Plugin assets for personal or tea
 
 `multi-model-synthesis` sends one task to five model APIs in parallel, collects independent answers, and asks GPT 5.5 Pro to synthesize the final answer immediately.
 
+Details: [skills/multi-model-synthesis/README.md](skills/multi-model-synthesis/README.md)
+
 Models:
 
 - GPT 5.5 Pro
@@ -135,6 +141,8 @@ py ".\skills\multi-model-synthesis\scripts\run_panel.py" --prompt "What is the b
 #### 2. Multi-Model Discussion
 
 `multi-model-discussion` sends one task to five model APIs in parallel, then shows the first-round answers to all models so they can critique, revise, and refine their positions. GPT 5.5 Pro then produces the final synthesis.
+
+Details: [skills/multi-model-discussion/README.md](skills/multi-model-discussion/README.md)
 
 Flow:
 
