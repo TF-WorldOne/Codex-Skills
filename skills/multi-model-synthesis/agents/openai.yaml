@@ -1,0 +1,4 @@
+interface:
+  display_name: "Multi-Model Synthesis"
+  short_description: "Ask five models and synthesize"
+  default_prompt: "Use $multi-model-synthesis to run a five-model panel on this task and synthesize the result."

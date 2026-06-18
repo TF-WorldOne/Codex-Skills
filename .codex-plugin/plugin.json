@@ -1,0 +1,34 @@
+{
+  "name": "multi-model-synthesis",
+  "version": "0.1.0",
+  "description": "Run five model APIs in parallel and synthesize their independent answers with GPT 5.5 Pro.",
+  "author": {
+    "name": "TF-WorldOne",
+    "url": "https://github.com/TF-WorldOne"
+  },
+  "homepage": "https://github.com/TF-WorldOne/Codex-Skills",
+  "repository": "https://github.com/TF-WorldOne/Codex-Skills",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "skills",
+    "multi-model",
+    "litellm",
+    "llm-panel"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Multi-Model Synthesis",
+    "shortDescription": "Ask five models and synthesize.",
+    "longDescription": "Runs GPT 5.5 Pro, Claude Opus 4.8 Max, DeepSeek V4 Pro, GLM 5.2, and Gemini 3.1 Pro Deep Think through API routes, then asks GPT 5.5 Pro to produce the final answer.",
+    "developerName": "TF-WorldOne",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use $multi-model-synthesis to compare five models."
+    ],
+    "brandColor": "#2563EB"
+  }
+}
