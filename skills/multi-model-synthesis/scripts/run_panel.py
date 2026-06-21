@@ -3,214 +3,48 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import datetime as dt
 import json
-import os
 from pathlib import Path
-import subprocess
 import sys
 import textwrap
 import time
-from typing import Any, Dict, Iterable, List, Optional
-import urllib.error
-import urllib.request
+from typing import Any, Dict, Iterable, List
+
+from multi_model_runtime import (
+    add_common_arguments,
+    aggregate_usage_and_cost,
+    check_cost_cap,
+    codex_home,
+    dry_run_output,
+    eprint,
+    filter_available_members,
+    finalize_run,
+    format_skipped,
+    get_available_model_ids,
+    load_price_config,
+    local_run_id,
+    manual_fallback_answer,
+    parse_csv,
+    read_prompt,
+    resolve_members,
+    run_model,
+    run_status,
+    start_router,
+    successful,
+    truncate,
+    utc_now_iso,
+)
 
 
-ROUTER_BASE_URL = "http://127.0.0.1:4141/v1"
+SKILL_NAME = "TawabaranPro - Synth Model"
 
 PANEL = [
-    {
-        "key": "gpt55pro",
-        "label": "GPT 5.5 Pro",
-        "model": "gpt-5.5",
-        "reasoning_effort": "xhigh",
-    },
-    {
-        "key": "opus48max",
-        "label": "Claude Opus 4.8 Max",
-        "model": "opus-4.8-max",
-        "reasoning_effort": "max",
-    },
-    {
-        "key": "deepseek",
-        "label": "DeepSeek V4 Pro",
-        "model": "deepseek-v4-pro",
-        "reasoning_effort": "xhigh",
-    },
-    {
-        "key": "glm52",
-        "label": "GLM 5.2",
-        "model": "glm-5.2",
-        "reasoning_effort": "xhigh",
-    },
-    {
-        "key": "gemini31deepthink",
-        "label": "Gemini 3.1 Pro Deep Think",
-        "model": "gemini-3.1-pro-deep-think",
-        "reasoning_effort": "high",
-    },
+    {"key": "gpt55pro", "label": "GPT 5.5 Pro", "model": "gpt-5.5", "reasoning_effort": "xhigh", "env_key": "OPENAI_API_KEY"},
+    {"key": "opus48max", "label": "Claude Opus 4.8 Max", "model": "opus-4.8-max", "reasoning_effort": "max", "env_key": "ANTHROPIC_API_KEY"},
+    {"key": "deepseek", "label": "DeepSeek V4 Pro", "model": "deepseek-v4-pro", "reasoning_effort": "xhigh", "env_key": "DEEPSEEK_API_KEY"},
+    {"key": "glm52", "label": "GLM 5.2", "model": "glm-5.2", "reasoning_effort": "xhigh", "env_key": "ZAI_API_KEY"},
+    {"key": "gemini31deepthink", "label": "Gemini 3.1 Pro Deep Think", "model": "gemini-3.1-pro-deep-think", "reasoning_effort": "high", "env_key": "GEMINI_API_KEY"},
 ]
-
-SYNTHESIZER = {
-    "key": "synthesis",
-    "label": "GPT 5.5 Pro Synthesis",
-    "model": "gpt-5.5",
-    "reasoning_effort": "xhigh",
-}
-
-
-def eprint(message: str) -> None:
-    print(message, file=sys.stderr, flush=True)
-
-
-def read_prompt(args: argparse.Namespace) -> str:
-    if args.prompt_file:
-        return Path(args.prompt_file).read_text(encoding="utf-8")
-    if args.prompt:
-        return args.prompt
-    if not sys.stdin.isatty():
-        return sys.stdin.read()
-    raise SystemExit("Provide --prompt, --prompt-file, or stdin.")
-
-
-def codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
-
-
-def router_script() -> Path:
-    override = os.environ.get("CODEX_MULTI_MODEL_ROUTER_SCRIPT")
-    if override and Path(override).is_file():
-        return Path(override)
-
-    bundled = Path(__file__).resolve().parents[3] / "scripts" / "start-router.ps1"
-    if bundled.is_file():
-        return bundled
-
-    return codex_home() / "start-glm52-router.ps1"
-
-
-def start_router() -> None:
-    script = router_script()
-    if not script.is_file():
-        raise SystemExit(f"LiteLLM router start script not found: {script}")
-
-    cmd = [
-        "powershell",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        str(script),
-    ]
-    proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if proc.returncode != 0:
-        raise SystemExit(
-            "Failed to start LiteLLM router.\n"
-            f"STDOUT:\n{proc.stdout}\n"
-            f"STDERR:\n{proc.stderr}"
-        )
-
-
-def api_post(path: str, payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(
-        f"{ROUTER_BASE_URL}{path}",
-        data=body,
-        method="POST",
-        headers={
-            "Authorization": "Bearer local",
-            "Content-Type": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            data = response.read().decode("utf-8", errors="replace")
-            return json.loads(data)
-    except urllib.error.HTTPError as exc:
-        data = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code}: {data}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(str(exc)) from exc
-
-
-def extract_content(response: Dict[str, Any]) -> str:
-    choices = response.get("choices") or []
-    if not choices:
-        return ""
-    message = choices[0].get("message") or {}
-    content = message.get("content", "")
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict):
-                value = item.get("text") or item.get("content")
-                if isinstance(value, str):
-                    parts.append(value)
-            elif isinstance(item, str):
-                parts.append(item)
-        return "\n".join(parts).strip()
-    return str(content).strip() if content else ""
-
-
-def run_model(
-    member: Dict[str, str],
-    messages: List[Dict[str, str]],
-    output_dir: Path,
-    timeout: int,
-) -> Dict[str, Any]:
-    start = time.monotonic()
-    key = member["key"]
-    last_message = output_dir / f"{key}.last.md"
-    response_path = output_dir / f"{key}.response.json"
-    error_path = output_dir / f"{key}.error.log"
-
-    payload: Dict[str, Any] = {
-        "model": member["model"],
-        "messages": messages,
-    }
-    effort = member.get("reasoning_effort")
-    if effort:
-        payload["reasoning_effort"] = effort
-
-    try:
-        response = api_post("/chat/completions", payload, timeout)
-        response_path.write_text(json.dumps(response, ensure_ascii=False, indent=2), encoding="utf-8")
-        content = extract_content(response)
-        last_message.write_text(content, encoding="utf-8")
-        return {
-            "key": key,
-            "label": member["label"],
-            "model": member["model"],
-            "status": "success" if content else "empty",
-            "duration_seconds": round(time.monotonic() - start, 2),
-            "last_message_path": str(last_message),
-            "response_path": str(response_path),
-            "error_path": str(error_path),
-            "content": content,
-            "usage": response.get("usage"),
-        }
-    except Exception as exc:
-        error_path.write_text(str(exc), encoding="utf-8")
-        return {
-            "key": key,
-            "label": member["label"],
-            "model": member["model"],
-            "status": "failed",
-            "duration_seconds": round(time.monotonic() - start, 2),
-            "last_message_path": str(last_message),
-            "response_path": str(response_path),
-            "error_path": str(error_path),
-            "content": "",
-            "error": str(exc),
-        }
-
-
-def truncate(value: str, limit: int) -> str:
-    if len(value) <= limit:
-        return value
-    return value[:limit] + f"\n\n[TRUNCATED after {limit} characters]"
 
 
 def respondent_messages(user_task: str) -> List[Dict[str, str]]:
@@ -229,30 +63,28 @@ def respondent_messages(user_task: str) -> List[Dict[str, str]]:
 
 def synthesis_messages(user_task: str, results: Iterable[Dict[str, Any]], max_chars: int) -> List[Dict[str, str]]:
     blocks: List[str] = []
-    for member, result in zip(PANEL, results):
+    for result in results:
         status = result.get("status")
-        content = str(result.get("content") or "")
         if status == "success":
-            body = truncate(content, max_chars)
+            body = truncate(str(result.get("content") or ""), max_chars)
         else:
             body = f"[{status}] model={result.get('model')}\n{truncate(str(result.get('error') or ''), 2000)}"
-        blocks.append(f"## {member['label']} ({status})\n{body}")
+        blocks.append(f"## {result.get('label')} ({status})\n{body}")
 
-    joined = "\n\n".join(blocks)
     synthesis_task = textwrap.dedent(
         f"""
         User task:
         {user_task}
 
         Independent model answers:
-        {joined}
+        {chr(10).join(blocks)}
         """
     ).strip()
     return [
         {
             "role": "system",
             "content": (
-                "You are GPT 5.5 Pro. Synthesize independent model answers into one final answer. "
+                "Synthesize independent model answers into one final answer. "
                 "Do not create a debate or discussion round. Weigh the answers critically, resolve contradictions, "
                 "and prefer concrete actionable conclusions. Answer in the same language as the user's task unless asked otherwise. "
                 "If any model failed, mention that briefly."
@@ -263,16 +95,70 @@ def synthesis_messages(user_task: str, results: Iterable[Dict[str, Any]], max_ch
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run five model APIs in parallel and synthesize with GPT 5.5.")
-    parser.add_argument("--prompt", help="Task text to send to the panel.")
-    parser.add_argument("--prompt-file", help="UTF-8 text file containing the task.")
-    parser.add_argument("--cwd", default=os.getcwd(), help="Reserved for compatibility; API mode does not use it.")
-    parser.add_argument("--out-dir", help="Directory for run artifacts.")
-    parser.add_argument("--timeout", type=int, default=900, help="Timeout in seconds for each respondent API call.")
-    parser.add_argument("--synthesis-timeout", type=int, default=900, help="Timeout in seconds for GPT 5.5 synthesis.")
-    parser.add_argument("--max-chars-per-response", type=int, default=60000, help="Per-model character cap in synthesis prompt.")
+    parser = argparse.ArgumentParser(description="Run model APIs in parallel and synthesize the result.")
+    add_common_arguments(parser)
+    parser.add_argument("--cwd", default=".", help="Reserved for compatibility; API mode does not use it.")
     parser.add_argument("--no-synthesis", action="store_true", help="Run respondents only.")
     return parser.parse_args()
+
+
+def prepare_runtime(args: argparse.Namespace) -> Dict[str, Any]:
+    if not (args.dry_run and args.skip_model_check):
+        eprint("[panel] starting LiteLLM router")
+        start_router(__file__)
+
+    available_ids = None
+    if not args.skip_model_check:
+        eprint("[panel] checking LiteLLM /v1/models")
+        available_ids = get_available_model_ids(min(args.timeout, 30))
+
+    requested_models = parse_csv(args.models)
+    requested_synth = [args.synthesizer] + parse_csv(args.synthesizer_fallbacks)
+
+    selected, unknown_models = resolve_members(PANEL, requested_models)
+    synthesizers, unknown_synths = resolve_members(PANEL, requested_synth)
+
+    selected, skipped_models = filter_available_members(
+        selected,
+        available_ids,
+        check_api_keys=not args.no_api_key_check,
+        check_model_registry=not args.skip_model_check,
+    )
+    synthesizers, skipped_synths = filter_available_members(
+        synthesizers,
+        available_ids,
+        check_api_keys=not args.no_api_key_check,
+        check_model_registry=not args.skip_model_check,
+    )
+
+    skipped = skipped_models + skipped_synths + unknown_models + unknown_synths
+    return {"selected": selected, "synthesizers": synthesizers, "skipped": skipped, "available_ids": available_ids}
+
+
+def run_synthesis(
+    synthesizers: List[Dict[str, str]],
+    messages: List[Dict[str, str]],
+    out_dir: Path,
+    args: argparse.Namespace,
+    prices: Dict[str, Dict[str, float]],
+) -> Dict[str, Any]:
+    attempts: List[Dict[str, Any]] = []
+    for member in synthesizers:
+        eprint(f"[panel] synthesizing with {member['label']} ({member['model']})")
+        result = run_model(
+            member,
+            messages,
+            out_dir,
+            f"synthesis.{member['key']}",
+            args.synthesis_timeout,
+            args.retries,
+            args.retry_backoff,
+            prices,
+        )
+        attempts.append(result)
+        if result.get("status") == "success":
+            return {"final": result, "attempts": attempts}
+    return {"final": attempts[-1] if attempts else {}, "attempts": attempts}
 
 
 def main() -> int:
@@ -282,64 +168,96 @@ def main() -> int:
 
     args = parse_args()
     user_task = read_prompt(args).strip()
-    if not user_task:
+    if not user_task and not args.dry_run:
         raise SystemExit("Prompt is empty.")
 
-    out_dir = Path(args.out_dir) if args.out_dir else codex_home() / "tmp" / "multi-model-synthesis" / dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    runtime = prepare_runtime(args)
+    selected = runtime["selected"]
+    synthesizers = runtime["synthesizers"]
+    skipped = runtime["skipped"]
+
+    if args.dry_run:
+        print(json.dumps(dry_run_output(skill_name=SKILL_NAME, selected=selected, skipped=skipped, synthesizers=synthesizers, prompt=user_task), ensure_ascii=False, indent=2))
+        return 0
+
+    if not selected:
+        raise SystemExit("No usable respondent models. Check --models, API keys, and LiteLLM /v1/models.")
+    if not args.no_synthesis and not synthesizers:
+        eprint("[panel] no usable synthesizer; the run will return respondent answers only")
+
+    run_id = local_run_id()
+    out_dir = Path(args.out_dir) if args.out_dir else codex_home() / "tmp" / "multi-model-synthesis" / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "task.txt").write_text(user_task, encoding="utf-8")
+    prices = load_price_config(args.price_config)
+    started = time.monotonic()
 
     eprint(f"[panel] output directory: {out_dir}")
-    eprint("[panel] starting LiteLLM router")
-    start_router()
-
-    messages = respondent_messages(user_task)
-    eprint("[panel] launching model API calls")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(PANEL)) as executor:
+    eprint(f"[panel] launching {len(selected)} model API calls")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(selected)) as executor:
         futures = [
-            executor.submit(run_model, member, messages, out_dir, args.timeout)
-            for member in PANEL
+            executor.submit(run_model, member, respondent_messages(user_task), out_dir, f"initial.{member['key']}", args.timeout, args.retries, args.retry_backoff, prices)
+            for member in selected
         ]
         results = [future.result() for future in futures]
 
-    success_count = sum(1 for item in results if item.get("status") == "success")
-    eprint(f"[panel] respondent success: {success_count}/{len(PANEL)}")
+    success_count = len(successful(results))
+    eprint(f"[panel] respondent success: {success_count}/{len(selected)}")
+    if success_count < len(selected) and not args.allow_partial:
+        eprint("[panel] partial failures found and --no-allow-partial is set")
 
     run_record: Dict[str, Any] = {
+        "run_id": run_id,
         "mode": "direct-litellm-chat-completions-api",
+        "started_at": utc_now_iso(),
         "task_path": str(out_dir / "task.txt"),
         "output_dir": str(out_dir),
-        "panel": PANEL,
+        "models_requested": parse_csv(args.models) or [item["model"] for item in PANEL],
+        "models_used": [item["model"] for item in selected],
+        "models_skipped": format_skipped(skipped),
+        "panel": selected,
         "results": results,
     }
 
-    if args.no_synthesis:
-        (out_dir / "run.json").write_text(json.dumps(run_record, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(json.dumps(run_record, ensure_ascii=False, indent=2))
-        return 0 if success_count else 2
-
     if success_count == 0:
-        (out_dir / "run.json").write_text(json.dumps(run_record, ensure_ascii=False, indent=2), encoding="utf-8")
-        eprint("[panel] all respondents failed; skipping synthesis")
+        run_record["status"] = "failed"
+        final_content = "All respondent models failed. See report.md and errors/ for details."
+        finalize_run(skill_name=SKILL_NAME, run_record=run_record, output_dir=out_dir, started_monotonic=started, final_content=final_content)
+        print(final_content)
         return 2
 
-    eprint("[panel] synthesizing with GPT 5.5 Pro API")
-    final = run_model(
-        SYNTHESIZER,
-        synthesis_messages(user_task, results, args.max_chars_per_response),
-        out_dir,
-        args.synthesis_timeout,
-    )
-    run_record["synthesis"] = final
-    (out_dir / "run.json").write_text(json.dumps(run_record, ensure_ascii=False, indent=2), encoding="utf-8")
+    stage_cost = aggregate_usage_and_cost(run_record)
+    if args.max_cost_usd is not None and stage_cost["estimated_cost_usd_known"] > args.max_cost_usd:
+        run_record["status"] = "partial_success"
+        final_content = manual_fallback_answer("Cost cap reached before synthesis", results, args.max_chars_per_response)
+        finalize_run(skill_name=SKILL_NAME, run_record=run_record, output_dir=out_dir, started_monotonic=started, final_content=final_content)
+        print(final_content)
+        return 4
+
+    if args.no_synthesis or not synthesizers:
+        run_record["status"] = run_status(results)
+        final_content = manual_fallback_answer("Synthesis", results, args.max_chars_per_response)
+        finalize_run(skill_name=SKILL_NAME, run_record=run_record, output_dir=out_dir, started_monotonic=started, final_content=final_content)
+        print(final_content)
+        return 0 if args.allow_partial or success_count == len(selected) else 2
+
+    synthesis = run_synthesis(synthesizers, synthesis_messages(user_task, results, args.max_chars_per_response), out_dir, args, prices)
+    run_record["synthesis"] = synthesis["final"]
+    run_record["synthesis_attempts"] = synthesis["attempts"]
+    final = synthesis["final"]
 
     if final.get("status") == "success":
-        print(str(final.get("content") or "").strip())
-        return 0
+        run_record["status"] = run_status(results) if success_count < len(selected) else "success"
+        final_content = str(final.get("content") or "").strip()
+    else:
+        run_record["status"] = "partial_success"
+        final_content = manual_fallback_answer("Synthesis", results, args.max_chars_per_response)
 
-    eprint(f"[panel] synthesis failed. See: {out_dir}")
-    print(json.dumps(run_record, ensure_ascii=False, indent=2))
-    return 3
+    metadata = finalize_run(skill_name=SKILL_NAME, run_record=run_record, output_dir=out_dir, started_monotonic=started, final_content=final_content)
+    if check_cost_cap(metadata, args.max_cost_usd):
+        eprint(f"[panel] known estimated cost exceeded --max-cost-usd: {metadata['estimated_cost_usd_known']}")
+    print(final_content)
+    return 0 if args.allow_partial or success_count == len(selected) else 2
 
 
 if __name__ == "__main__":

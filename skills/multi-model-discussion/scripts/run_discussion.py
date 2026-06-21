@@ -3,183 +3,48 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import datetime as dt
 import json
-import os
 from pathlib import Path
-import subprocess
 import sys
 import textwrap
 import time
 from typing import Any, Dict, Iterable, List
-import urllib.error
-import urllib.request
+
+from multi_model_runtime import (
+    add_common_arguments,
+    aggregate_usage_and_cost,
+    check_cost_cap,
+    codex_home,
+    dry_run_output,
+    eprint,
+    filter_available_members,
+    finalize_run,
+    format_skipped,
+    get_available_model_ids,
+    load_price_config,
+    local_run_id,
+    manual_fallback_answer,
+    parse_csv,
+    read_prompt,
+    resolve_members,
+    run_model,
+    run_status,
+    start_router,
+    successful,
+    truncate,
+    utc_now_iso,
+)
 
 
-ROUTER_BASE_URL = "http://127.0.0.1:4141/v1"
+SKILL_NAME = "TawabaranPro - Discussion Model"
 
 PANEL = [
-    {"key": "gpt55pro", "label": "GPT 5.5 Pro", "model": "gpt-5.5", "reasoning_effort": "xhigh"},
-    {"key": "opus48max", "label": "Claude Opus 4.8 Max", "model": "opus-4.8-max", "reasoning_effort": "max"},
-    {"key": "deepseek", "label": "DeepSeek V4 Pro", "model": "deepseek-v4-pro", "reasoning_effort": "xhigh"},
-    {"key": "glm52", "label": "GLM 5.2", "model": "glm-5.2", "reasoning_effort": "xhigh"},
-    {
-        "key": "gemini31deepthink",
-        "label": "Gemini 3.1 Pro Deep Think",
-        "model": "gemini-3.1-pro-deep-think",
-        "reasoning_effort": "high",
-    },
+    {"key": "gpt55pro", "label": "GPT 5.5 Pro", "model": "gpt-5.5", "reasoning_effort": "xhigh", "env_key": "OPENAI_API_KEY"},
+    {"key": "opus48max", "label": "Claude Opus 4.8 Max", "model": "opus-4.8-max", "reasoning_effort": "max", "env_key": "ANTHROPIC_API_KEY"},
+    {"key": "deepseek", "label": "DeepSeek V4 Pro", "model": "deepseek-v4-pro", "reasoning_effort": "xhigh", "env_key": "DEEPSEEK_API_KEY"},
+    {"key": "glm52", "label": "GLM 5.2", "model": "glm-5.2", "reasoning_effort": "xhigh", "env_key": "ZAI_API_KEY"},
+    {"key": "gemini31deepthink", "label": "Gemini 3.1 Pro Deep Think", "model": "gemini-3.1-pro-deep-think", "reasoning_effort": "high", "env_key": "GEMINI_API_KEY"},
 ]
-
-SYNTHESIZER = {
-    "key": "synthesis",
-    "label": "GPT 5.5 Pro Synthesis",
-    "model": "gpt-5.5",
-    "reasoning_effort": "xhigh",
-}
-
-
-def eprint(message: str) -> None:
-    print(message, file=sys.stderr, flush=True)
-
-
-def read_prompt(args: argparse.Namespace) -> str:
-    if args.prompt_file:
-        return Path(args.prompt_file).read_text(encoding="utf-8")
-    if args.prompt:
-        return args.prompt
-    if not sys.stdin.isatty():
-        return sys.stdin.read()
-    raise SystemExit("Provide --prompt, --prompt-file, or stdin.")
-
-
-def codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
-
-
-def router_script() -> Path:
-    override = os.environ.get("CODEX_MULTI_MODEL_ROUTER_SCRIPT")
-    if override and Path(override).is_file():
-        return Path(override)
-
-    bundled = Path(__file__).resolve().parents[3] / "scripts" / "start-router.ps1"
-    if bundled.is_file():
-        return bundled
-
-    return codex_home() / "start-glm52-router.ps1"
-
-
-def start_router() -> None:
-    script = router_script()
-    if not script.is_file():
-        raise SystemExit(f"LiteLLM router start script not found: {script}")
-
-    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
-    proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if proc.returncode != 0:
-        raise SystemExit(
-            "Failed to start LiteLLM router.\n"
-            f"STDOUT:\n{proc.stdout}\n"
-            f"STDERR:\n{proc.stderr}"
-        )
-
-
-def api_post(path: str, payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(
-        f"{ROUTER_BASE_URL}{path}",
-        data=body,
-        method="POST",
-        headers={"Authorization": "Bearer local", "Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            data = response.read().decode("utf-8", errors="replace")
-            return json.loads(data)
-    except urllib.error.HTTPError as exc:
-        data = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code}: {data}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(str(exc)) from exc
-
-
-def extract_content(response: Dict[str, Any]) -> str:
-    choices = response.get("choices") or []
-    if not choices:
-        return ""
-    message = choices[0].get("message") or {}
-    content = message.get("content", "")
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict):
-                value = item.get("text") or item.get("content")
-                if isinstance(value, str):
-                    parts.append(value)
-            elif isinstance(item, str):
-                parts.append(item)
-        return "\n".join(parts).strip()
-    return str(content).strip() if content else ""
-
-
-def run_model(
-    member: Dict[str, str],
-    messages: List[Dict[str, str]],
-    output_dir: Path,
-    output_key: str,
-    timeout: int,
-) -> Dict[str, Any]:
-    start = time.monotonic()
-    last_message = output_dir / f"{output_key}.last.md"
-    response_path = output_dir / f"{output_key}.response.json"
-    error_path = output_dir / f"{output_key}.error.log"
-
-    payload: Dict[str, Any] = {"model": member["model"], "messages": messages}
-    effort = member.get("reasoning_effort")
-    if effort:
-        payload["reasoning_effort"] = effort
-
-    try:
-        response = api_post("/chat/completions", payload, timeout)
-        response_path.write_text(json.dumps(response, ensure_ascii=False, indent=2), encoding="utf-8")
-        content = extract_content(response)
-        last_message.write_text(content, encoding="utf-8")
-        return {
-            "key": member["key"],
-            "output_key": output_key,
-            "label": member["label"],
-            "model": member["model"],
-            "status": "success" if content else "empty",
-            "duration_seconds": round(time.monotonic() - start, 2),
-            "last_message_path": str(last_message),
-            "response_path": str(response_path),
-            "error_path": str(error_path),
-            "content": content,
-            "usage": response.get("usage"),
-        }
-    except Exception as exc:
-        error_path.write_text(str(exc), encoding="utf-8")
-        return {
-            "key": member["key"],
-            "output_key": output_key,
-            "label": member["label"],
-            "model": member["model"],
-            "status": "failed",
-            "duration_seconds": round(time.monotonic() - start, 2),
-            "last_message_path": str(last_message),
-            "response_path": str(response_path),
-            "error_path": str(error_path),
-            "content": "",
-            "error": str(exc),
-        }
-
-
-def truncate(value: str, limit: int) -> str:
-    if len(value) <= limit:
-        return value
-    return value[:limit] + f"\n\n[TRUNCATED after {limit} characters]"
 
 
 def format_results(title: str, results: Iterable[Dict[str, Any]], max_chars: int) -> str:
@@ -216,13 +81,9 @@ def discussion_messages(
     round_number: int,
     max_chars: int,
 ) -> List[Dict[str, str]]:
-    context_parts = [
-        format_results("Initial independent answers", initial_results, max_chars),
-    ]
+    context_parts = [format_results("Initial independent answers", initial_results, max_chars)]
     if previous_discussion_results:
-        context_parts.append(
-            format_results(f"Previous discussion round {round_number - 1}", previous_discussion_results, max_chars)
-        )
+        context_parts.append(format_results(f"Previous discussion round {round_number - 1}", previous_discussion_results, max_chars))
 
     user_content = textwrap.dedent(
         f"""
@@ -230,8 +91,15 @@ def discussion_messages(
         {user_task}
 
         You are {member['label']}. Review the other models' answers and any previous discussion.
-        Critique weak assumptions, identify what should change, and give your revised position.
         Do not roleplay the other models. Do not merely summarize; update your answer after seeing the panel.
+
+        Use this exact structure:
+        1. Agreements
+        2. Disagreements
+        3. Missing points
+        4. Corrections to your initial answer
+        5. Final recommendation
+        6. Confidence
 
         {chr(10).join(context_parts)}
         """
@@ -271,9 +139,10 @@ def synthesis_messages(
         {
             "role": "system",
             "content": (
-                "You are GPT 5.5 Pro. Synthesize the full multi-model panel discussion into one final answer. "
-                "Weigh the initial answers and discussion revisions critically, resolve contradictions, and prefer concrete conclusions. "
-                "Answer in the same language as the user's task unless asked otherwise. Mention failures only if relevant."
+                "Synthesize the full multi-model panel discussion into one final answer. "
+                "Separate consensus, disagreements, minority views, adopted conclusion, and reasoning when useful. "
+                "Resolve contradictions and prefer concrete conclusions. Answer in the same language as the user's task unless asked otherwise. "
+                "Mention failures only if relevant."
             ),
         },
         {"role": "user", "content": synthesis_task},
@@ -281,16 +150,97 @@ def synthesis_messages(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run five model APIs, discuss, then synthesize with GPT 5.5.")
-    parser.add_argument("--prompt", help="Task text to send to the panel.")
-    parser.add_argument("--prompt-file", help="UTF-8 text file containing the task.")
-    parser.add_argument("--out-dir", help="Directory for run artifacts.")
-    parser.add_argument("--timeout", type=int, default=900, help="Timeout in seconds for each model API call.")
-    parser.add_argument("--synthesis-timeout", type=int, default=900, help="Timeout in seconds for GPT 5.5 synthesis.")
+    parser = argparse.ArgumentParser(description="Run model APIs, discuss, then synthesize.")
+    add_common_arguments(parser)
     parser.add_argument("--discussion-rounds", type=int, default=1, help="Number of discussion/revision rounds after initial answers.")
-    parser.add_argument("--max-chars-per-response", type=int, default=60000, help="Per-model character cap in prompts.")
     parser.add_argument("--no-synthesis", action="store_true", help="Run discussion only.")
     return parser.parse_args()
+
+
+def prepare_runtime(args: argparse.Namespace) -> Dict[str, Any]:
+    if not (args.dry_run and args.skip_model_check):
+        eprint("[discussion] starting LiteLLM router")
+        start_router(__file__)
+
+    available_ids = None
+    if not args.skip_model_check:
+        eprint("[discussion] checking LiteLLM /v1/models")
+        available_ids = get_available_model_ids(min(args.timeout, 30))
+
+    selected, unknown_models = resolve_members(PANEL, parse_csv(args.models))
+    synthesizers, unknown_synths = resolve_members(PANEL, [args.synthesizer] + parse_csv(args.synthesizer_fallbacks))
+
+    selected, skipped_models = filter_available_members(
+        selected,
+        available_ids,
+        check_api_keys=not args.no_api_key_check,
+        check_model_registry=not args.skip_model_check,
+    )
+    synthesizers, skipped_synths = filter_available_members(
+        synthesizers,
+        available_ids,
+        check_api_keys=not args.no_api_key_check,
+        check_model_registry=not args.skip_model_check,
+    )
+    return {"selected": selected, "synthesizers": synthesizers, "skipped": skipped_models + skipped_synths + unknown_models + unknown_synths}
+
+
+def run_round(
+    *,
+    members: List[Dict[str, str]],
+    messages_by_member: Dict[str, List[Dict[str, str]]],
+    out_dir: Path,
+    output_prefix: str,
+    args: argparse.Namespace,
+    prices: Dict[str, Dict[str, float]],
+) -> List[Dict[str, Any]]:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(members)) as executor:
+        futures = [
+            executor.submit(
+                run_model,
+                member,
+                messages_by_member[member["key"]],
+                out_dir,
+                f"{output_prefix}.{member['key']}",
+                args.timeout,
+                args.retries,
+                args.retry_backoff,
+                prices,
+            )
+            for member in members
+        ]
+        return [future.result() for future in futures]
+
+
+def run_synthesis(
+    synthesizers: List[Dict[str, str]],
+    messages: List[Dict[str, str]],
+    out_dir: Path,
+    args: argparse.Namespace,
+    prices: Dict[str, Dict[str, float]],
+) -> Dict[str, Any]:
+    attempts: List[Dict[str, Any]] = []
+    for member in synthesizers:
+        eprint(f"[discussion] synthesizing with {member['label']} ({member['model']})")
+        result = run_model(
+            member,
+            messages,
+            out_dir,
+            f"synthesis.{member['key']}",
+            args.synthesis_timeout,
+            args.retries,
+            args.retry_backoff,
+            prices,
+        )
+        attempts.append(result)
+        if result.get("status") == "success":
+            return {"final": result, "attempts": attempts}
+    return {"final": attempts[-1] if attempts else {}, "attempts": attempts}
+
+
+def active_members_from_results(members: List[Dict[str, str]], results: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    success_keys = {item.get("key") for item in successful(results)}
+    return [member for member in members if member["key"] in success_keys]
 
 
 def main() -> int:
@@ -299,91 +249,130 @@ def main() -> int:
         sys.stderr.reconfigure(encoding="utf-8")
 
     args = parse_args()
-    user_task = read_prompt(args).strip()
-    if not user_task:
-        raise SystemExit("Prompt is empty.")
     if args.discussion_rounds < 1:
         raise SystemExit("--discussion-rounds must be at least 1.")
+    user_task = read_prompt(args).strip()
+    if not user_task and not args.dry_run:
+        raise SystemExit("Prompt is empty.")
 
-    out_dir = Path(args.out_dir) if args.out_dir else codex_home() / "tmp" / "multi-model-discussion" / dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    runtime = prepare_runtime(args)
+    selected = runtime["selected"]
+    synthesizers = runtime["synthesizers"]
+    skipped = runtime["skipped"]
+
+    if args.dry_run:
+        print(json.dumps(dry_run_output(skill_name=SKILL_NAME, selected=selected, skipped=skipped, synthesizers=synthesizers, prompt=user_task, discussion_rounds=args.discussion_rounds), ensure_ascii=False, indent=2))
+        return 0
+
+    if not selected:
+        raise SystemExit("No usable respondent models. Check --models, API keys, and LiteLLM /v1/models.")
+    if not args.no_synthesis and not synthesizers:
+        eprint("[discussion] no usable synthesizer; the run will return discussion answers only")
+
+    run_id = local_run_id()
+    out_dir = Path(args.out_dir) if args.out_dir else codex_home() / "tmp" / "multi-model-discussion" / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "task.txt").write_text(user_task, encoding="utf-8")
+    prices = load_price_config(args.price_config)
+    started = time.monotonic()
 
     eprint(f"[discussion] output directory: {out_dir}")
-    eprint("[discussion] starting LiteLLM router")
-    start_router()
+    eprint(f"[discussion] launching initial calls for {len(selected)} models")
+    initial_messages_by_member = {member["key"]: initial_messages(user_task) for member in selected}
+    initial_results = run_round(members=selected, messages_by_member=initial_messages_by_member, out_dir=out_dir, output_prefix="initial", args=args, prices=prices)
 
-    eprint("[discussion] launching initial model API calls")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(PANEL)) as executor:
-        initial_results = [
-            future.result()
-            for future in [
-                executor.submit(run_model, member, initial_messages(user_task), out_dir, f"initial.{member['key']}", args.timeout)
-                for member in PANEL
-            ]
-        ]
-
+    active_members = active_members_from_results(selected, initial_results)
+    eprint(f"[discussion] initial success: {len(active_members)}/{len(selected)}")
     discussion_rounds: List[List[Dict[str, Any]]] = []
     previous_round: List[Dict[str, Any]] = []
-    for round_number in range(1, args.discussion_rounds + 1):
-        eprint(f"[discussion] launching discussion round {round_number}")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(PANEL)) as executor:
-            round_results = [
-                future.result()
-                for future in [
-                    executor.submit(
-                        run_model,
-                        member,
-                        discussion_messages(
-                            user_task,
-                            member,
-                            initial_results,
-                            previous_round,
-                            round_number,
-                            args.max_chars_per_response,
-                        ),
-                        out_dir,
-                        f"discussion{round_number}.{member['key']}",
-                        args.timeout,
-                    )
-                    for member in PANEL
-                ]
-            ]
-        discussion_rounds.append(round_results)
-        previous_round = round_results
-
     run_record: Dict[str, Any] = {
+        "run_id": run_id,
         "mode": "direct-litellm-chat-completions-api-with-discussion",
+        "started_at": utc_now_iso(),
         "task_path": str(out_dir / "task.txt"),
         "output_dir": str(out_dir),
-        "panel": PANEL,
+        "models_requested": parse_csv(args.models) or [item["model"] for item in PANEL],
+        "models_used": [item["model"] for item in selected],
+        "models_skipped": format_skipped(skipped),
+        "panel": selected,
         "initial_results": initial_results,
         "discussion_rounds": discussion_rounds,
     }
 
-    if args.no_synthesis:
-        (out_dir / "run.json").write_text(json.dumps(run_record, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(json.dumps(run_record, ensure_ascii=False, indent=2))
+    stage_cost = aggregate_usage_and_cost(run_record)
+    if args.max_cost_usd is not None and stage_cost["estimated_cost_usd_known"] > args.max_cost_usd:
+        run_record["status"] = "partial_success"
+        final_content = manual_fallback_answer("Cost cap reached after initial answers", initial_results, args.max_chars_per_response)
+        finalize_run(skill_name=SKILL_NAME, run_record=run_record, output_dir=out_dir, started_monotonic=started, final_content=final_content)
+        print(final_content)
+        return 4
+
+    for round_number in range(1, args.discussion_rounds + 1):
+        if not active_members:
+            eprint("[discussion] no active models left for discussion")
+            break
+        eprint(f"[discussion] launching discussion round {round_number} for {len(active_members)} models")
+        messages_by_member = {
+            member["key"]: discussion_messages(
+                user_task,
+                member,
+                initial_results,
+                previous_round,
+                round_number,
+                args.max_chars_per_response,
+            )
+            for member in active_members
+        }
+        round_results = run_round(members=active_members, messages_by_member=messages_by_member, out_dir=out_dir, output_prefix=f"discussion{round_number}", args=args, prices=prices)
+        discussion_rounds.append(round_results)
+        previous_round = round_results
+        active_members = active_members_from_results(active_members, round_results)
+        stage_cost = aggregate_usage_and_cost(run_record)
+        if args.max_cost_usd is not None and stage_cost["estimated_cost_usd_known"] > args.max_cost_usd:
+            run_record["status"] = "partial_success"
+            final_content = manual_fallback_answer("Cost cap reached during discussion", round_results, args.max_chars_per_response)
+            finalize_run(skill_name=SKILL_NAME, run_record=run_record, output_dir=out_dir, started_monotonic=started, final_content=final_content)
+            print(final_content)
+            return 4
+
+    successful_final_round = successful(discussion_rounds[-1]) if discussion_rounds else successful(initial_results)
+    if not successful_final_round:
+        run_record["status"] = "failed"
+        final_content = "All respondent models failed before synthesis. See report.md and errors/ for details."
+        finalize_run(skill_name=SKILL_NAME, run_record=run_record, output_dir=out_dir, started_monotonic=started, final_content=final_content)
+        print(final_content)
+        return 2
+
+    if args.no_synthesis or not synthesizers:
+        run_record["status"] = run_status(discussion_rounds[-1] if discussion_rounds else initial_results)
+        final_content = manual_fallback_answer("Synthesis", successful_final_round, args.max_chars_per_response)
+        finalize_run(skill_name=SKILL_NAME, run_record=run_record, output_dir=out_dir, started_monotonic=started, final_content=final_content)
+        print(final_content)
         return 0
 
-    eprint("[discussion] synthesizing with GPT 5.5 Pro API")
-    final = run_model(
-        SYNTHESIZER,
+    synthesis = run_synthesis(
+        synthesizers,
         synthesis_messages(user_task, initial_results, discussion_rounds, args.max_chars_per_response),
         out_dir,
-        SYNTHESIZER["key"],
-        args.synthesis_timeout,
+        args,
+        prices,
     )
-    run_record["synthesis"] = final
-    (out_dir / "run.json").write_text(json.dumps(run_record, ensure_ascii=False, indent=2), encoding="utf-8")
+    run_record["synthesis"] = synthesis["final"]
+    run_record["synthesis_attempts"] = synthesis["attempts"]
+    final = synthesis["final"]
 
     if final.get("status") == "success":
-        print(str(final.get("content") or "").strip())
-        return 0
+        run_record["status"] = "partial_success" if len(successful(initial_results)) < len(selected) else "success"
+        final_content = str(final.get("content") or "").strip()
+    else:
+        run_record["status"] = "partial_success"
+        final_content = manual_fallback_answer("Synthesis", successful_final_round, args.max_chars_per_response)
 
-    eprint(f"[discussion] synthesis failed. See: {out_dir}")
-    print(json.dumps(run_record, ensure_ascii=False, indent=2))
-    return 3
+    metadata = finalize_run(skill_name=SKILL_NAME, run_record=run_record, output_dir=out_dir, started_monotonic=started, final_content=final_content)
+    if check_cost_cap(metadata, args.max_cost_usd):
+        eprint(f"[discussion] known estimated cost exceeded --max-cost-usd: {metadata['estimated_cost_usd_known']}")
+    print(final_content)
+    return 0
 
 
 if __name__ == "__main__":

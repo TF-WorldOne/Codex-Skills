@@ -1,0 +1,22 @@
+{
+  "gpt-5.5": {
+    "input_per_1m": 0,
+    "output_per_1m": 0
+  },
+  "opus-4.8-max": {
+    "input_per_1m": 0,
+    "output_per_1m": 0
+  },
+  "deepseek-v4-pro": {
+    "input_per_1m": 0,
+    "output_per_1m": 0
+  },
+  "glm-5.2": {
+    "input_per_1m": 0,
+    "output_per_1m": 0
+  },
+  "gemini-3.1-pro-deep-think": {
+    "input_per_1m": 0,
+    "output_per_1m": 0
+  }
+}

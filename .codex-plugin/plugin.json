@@ -1,7 +1,7 @@
 {
-  "name": "multi-model-synthesis",
-  "version": "0.2.0",
-  "description": "Run five model APIs in parallel, either synthesize immediately or discuss before GPT 5.5 Pro produces the final answer.",
+  "name": "codex-multi-model-skills",
+  "version": "0.3.0",
+  "description": "Run selectable model APIs in parallel, either synthesize immediately or discuss before a configurable synthesizer produces the final answer.",
   "author": {
     "name": "TF-WorldOne",
     "url": "https://github.com/TF-WorldOne"

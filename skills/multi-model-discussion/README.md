@@ -1,10 +1,12 @@
-# Multi-Model Discussion
+# TawabaranPro - Discussion Model
 
 ## 日本語
 
 `multi-model-discussion` は、1つの課題を5つのモデルAPIへ同時に投げ、まず各モデルに独立回答させたあと、その回答を全モデルに共有して再考・批判・補足させ、最後に GPT 5.5 Pro が総括する Codex Skill です。
 
 このスキルは、単なる多数決ではなく、モデル同士の視点差を使って結論を強くしたいときに使います。
+
+現在は、利用可能なAPIキーと LiteLLM `/v1/models` を確認し、使えるモデルだけで実行できます。統括モデルも `--synthesizer` で変更できます。
 
 ### 使用モデル
 
@@ -36,6 +38,18 @@
 py ".\skills\multi-model-discussion\scripts\run_discussion.py" --prompt "この事業案のリスクと勝ち筋を検討してください。"
 ```
 
+使うモデルと統括モデルを指定する例:
+
+```powershell
+py ".\skills\multi-model-discussion\scripts\run_discussion.py" --prompt "..." --models opus-4.8-max,gemini-3.1-pro-deep-think --synthesizer opus-4.8-max
+```
+
+API呼び出しなしで構成だけ確認する例:
+
+```powershell
+py ".\skills\multi-model-discussion\scripts\run_discussion.py" --dry-run --skip-model-check --models deepseek-v4-pro,gemini-3.1-pro-deep-think --discussion-rounds 2
+```
+
 長い課題文はテキストファイルに保存して実行できます。
 
 ```powershell
@@ -53,13 +67,27 @@ py ".\skills\multi-model-discussion\scripts\run_discussion.py" --prompt "この�
 - 5モデルの初回独立回答
 - ディスカッション後の各モデルの改訂回答
 - 各モデルの生レスポンス
-- GPT 5.5 Pro による最終統合回答
+- 選択した統括モデルによる最終統合回答
+- `metadata.json` にモデル別成功/失敗、トークン使用量、推定コスト
+- `report.md` と `final.md`
 
 実行結果は通常、次の場所に保存されます。
 
 ```text
 %USERPROFILE%\.codex\tmp\multi-model-discussion\
 ```
+
+主なファイル:
+
+- `final.md`: 最終回答
+- `report.md`: 人間向け実行レポート
+- `metadata.json`: 実行ID、使用モデル、成功/失敗、トークン、推定コスト
+- `run.json`: 後処理/API連携向けの全部入りデータ
+- `models/*.md`: 初回回答・議論回答・統括回答
+- `raw/*.response.json`: API生レスポンス
+- `errors/*.log`: 失敗ログ
+
+価格推定を使う場合は `examples/model-prices.example.json` をコピーして実価格を入れ、`--price-config` で指定してください。
 
 ### 必要な環境変数
 
@@ -86,6 +114,8 @@ APIキーはリポジトリに含めないでください。
 `multi-model-discussion` is a Codex Skill that sends one task to five model APIs in parallel, collects independent first answers, shares those answers back to the full panel for critique and revision, and then asks GPT 5.5 Pro to produce the final synthesis.
 
 Use this skill when you want stronger conclusions through cross-model review rather than a simple one-pass answer.
+
+It now filters by available API keys and LiteLLM `/v1/models`, supports selectable models, and allows a configurable synthesizer with fallbacks.
 
 ### Models
 
@@ -117,6 +147,18 @@ Use this skill when you want stronger conclusions through cross-model review rat
 py ".\skills\multi-model-discussion\scripts\run_discussion.py" --prompt "Evaluate the risks and strongest path for this business idea."
 ```
 
+Select models and synthesizer:
+
+```powershell
+py ".\skills\multi-model-discussion\scripts\run_discussion.py" --prompt "..." --models opus-4.8-max,gemini-3.1-pro-deep-think --synthesizer opus-4.8-max
+```
+
+Inspect the planned run without chat completions:
+
+```powershell
+py ".\skills\multi-model-discussion\scripts\run_discussion.py" --dry-run --skip-model-check --models deepseek-v4-pro,gemini-3.1-pro-deep-think --discussion-rounds 2
+```
+
 For long prompts, save the task to a text file.
 
 ```powershell
@@ -134,13 +176,27 @@ py ".\skills\multi-model-discussion\scripts\run_discussion.py" --prompt "Review 
 - First independent answers from five models
 - Revised answers after the discussion round
 - Raw model responses
-- Final GPT 5.5 Pro synthesis
+- Final synthesis from the selected synthesizer
+- Token usage, estimated cost, success/failure metadata
+- `report.md` and `final.md`
 
 Run artifacts are usually saved under:
 
 ```text
 %USERPROFILE%\.codex\tmp\multi-model-discussion\
 ```
+
+Main files:
+
+- `final.md`: final answer
+- `report.md`: human-readable run report
+- `metadata.json`: run id, models used/skipped, status, tokens, estimated cost
+- `run.json`: complete machine-readable record
+- `models/*.md`: initial, discussion, and synthesis answers
+- `raw/*.response.json`: raw API responses
+- `errors/*.log`: failure logs
+
+For cost estimates, copy `examples/model-prices.example.json`, enter current prices, and pass it with `--price-config`.
 
 ### Required Environment Variables
 

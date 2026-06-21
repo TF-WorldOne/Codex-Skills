@@ -1,4 +1,4 @@
 interface:
-  display_name: "Multi-Model Discussion"
-  short_description: "Ask five models, discuss, synthesize"
-  default_prompt: "Use $multi-model-discussion to run a five-model discussion and final synthesis."
+  display_name: "TawabaranPro - Discussion Model"
+  short_description: "Ask selected models, discuss, synthesize"
+  default_prompt: "Use $multi-model-discussion to run a selectable multi-model discussion and final synthesis."

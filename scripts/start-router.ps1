@@ -20,7 +20,9 @@ $envKeys = @(
   "ANTHROPIC_API_KEY",
   "DEEPSEEK_API_KEY",
   "ZAI_API_KEY",
-  "GEMINI_API_KEY"
+  "GEMINI_API_KEY",
+  "MOONSHOT_API_KEY",
+  "MINIMAX_API_KEY"
 )
 
 foreach ($name in $envKeys) {
@@ -32,10 +34,15 @@ foreach ($name in $envKeys) {
   }
 }
 
+$availableKeys = @()
 foreach ($name in $envKeys) {
-  if (-not (Get-Item "Env:$name" -ErrorAction SilentlyContinue)) {
-    throw "$name is not set. Set it as an environment variable before starting the router."
+  if (Get-Item "Env:$name" -ErrorAction SilentlyContinue) {
+    $availableKeys += $name
   }
+}
+
+if ($availableKeys.Count -eq 0) {
+  throw "No provider API keys are set. Set at least one supported API key before starting the router."
 }
 
 try {
